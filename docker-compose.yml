@@ -1,5 +1,21 @@
 version: '3.8'
+
 services:
+  oracle-db:
+    image: gvenzl/oracle-free:latest
+    container_name: wine-oracle-db
+    ports:
+      - "1521:1521"
+    environment:
+      - ORACLE_PASSWORD=YourStrongPassword123
+      - APP_USER=wine_user
+      - APP_USER_PASSWORD=wine_pass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
   wine-api:
     build: .
     container_name: wine-quality-api
@@ -8,3 +24,9 @@ services:
     environment:
       - MODEL_PATH=/app/models/wine_model.pkl
       - SCALER_PATH=/app/models/scaler.pkl
+      - DB_USER=wine_user
+      - DB_PASSWORD=wine_pass
+      - DB_DSN=oracle-db:1521/FREEPDB1
+    depends_on:
+      oracle-db:
+        condition: service_healthy
