@@ -21,3 +21,6 @@ gunicorn==21.2.0
 
 # DVC
 dvc==3.45.0
+
+oracledb==2.1.0
+python-dotenv==1.0.1
