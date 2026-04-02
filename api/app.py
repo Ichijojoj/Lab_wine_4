@@ -160,6 +160,7 @@ async def predict(features: WineFeatures):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Model not initialized"
         )
+
     try:
         raw_dict = features.model_dump()
         features_dict = {}
