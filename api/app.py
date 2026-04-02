@@ -8,9 +8,13 @@ from typing import List, Optional
 import os
 import sys
 
+from src.database import OracleDB
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.model import WineQualityModel
+
+db = OracleDB()
 
 # Настройка логгера
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +38,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❓ Unexpected error: {type(e).__name__}: {e}")
         model = None
-
+    db.init_db()
     yield
 
     model = None
@@ -47,13 +51,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
-app = FastAPI(
-    title="🍷 Wine Quality Prediction API",
-    description="API для предсказания качества вина на основе химических характеристик",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -163,8 +161,17 @@ async def predict(features: WineFeatures):
             detail="Model not initialized"
         )
     try:
-        features_dict = {f.replace('_', ' '): v for f, v in features.model_dump().items()}
+        raw_dict = features.model_dump()
+        features_dict = {}
+        for key, value in raw_dict.items():
+            new_key = key.replace('_', ' ')
+            if new_key == "ph":
+                new_key = "pH"
+            features_dict[new_key] = value
         result = model.predict(features_dict)
+
+        # СОХРАНЕНИЕ В БАЗУ ДАННЫХ
+        db.save_prediction(features_dict, result)
         return PredictionResponse(**result)
     except ValueError as e:
         logger.warning(f"Invalid input: {e}")
