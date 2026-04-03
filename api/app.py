@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import json
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,7 +9,8 @@ from typing import List, Optional
 import os
 import sys
 
-from src.database import OracleDB
+from kafka import KafkaProducer
+from kafka.errors import KafkaError, NoBrokersAvailable, KafkaTimeoutError
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -20,9 +22,14 @@ db = OracleDB()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+model: Optional[WineQualityModel] = None
+producer: Optional[KafkaProducer] = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model
+    global model, producer
+
     try:
         model_path = os.getenv('MODEL_PATH', 'models/wine_model.pkl')
         scaler_path = os.getenv('SCALER_PATH', 'models/scaler.pkl')
@@ -32,17 +39,36 @@ async def lifespan(app: FastAPI):
 
         model = WineQualityModel(model_path=model_path, scaler_path=scaler_path)
         logger.info(f"✅ Model loaded successfully from {model_path}")
-    except (FileNotFoundError, AttributeError, ImportError) as e:
-        logger.error(f"❌ Critical error loading model: {e}")
+    except FileNotFoundError as e:
+        logger.error(f"❌ File not found error: {e}")
         model = None
-    except Exception as e:
-        logger.error(f"❓ Unexpected error: {type(e).__name__}: {e}")
+    except (AttributeError, ImportError, ModuleNotFoundError) as e:
+        logger.error(f"❌ Critical error loading model objects (libraries mismatch): {e}")
         model = None
-    db.init_db()
+    except OSError as e:
+        logger.error(f"❌ OS error while accessing model files: {e}")
+        model = None
+
+    try:
+        kafka_broker = os.getenv('KAFKA_BROKER', 'localhost:9092')
+        producer = KafkaProducer(
+            bootstrap_servers=[kafka_broker],
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+        logger.info("✅ Kafka Producer initialized")
+    except NoBrokersAvailable as e:
+        logger.error(f"❌ Kafka broker unavailable at {kafka_broker}: {e}")
+        producer = None
+    except KafkaError as e:
+        logger.error(f"❌ Kafka initialization failed: {e}")
+        producer = None
+
     yield
 
     model = None
-    logger.info("👋 Model unloaded")
+    if producer is not None:
+        producer.close()
+    logger.info("👋 Model and Kafka Producer unloaded")
 
 
 app = FastAPI(
@@ -83,7 +109,6 @@ class WineFeatures(BaseModel):
         protected_namespaces=()
     )
 
-
     fixed_acidity: float = Field(..., description="Fixed acidity")
     volatile_acidity: float = Field(..., description="Volatile acidity")
     citric_acid: float = Field(..., description="Citric acid")
@@ -108,9 +133,11 @@ class PredictionResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
+    kafka_connected: bool
 
     class Config:
         protected_namespaces = ()
+
 
 class FeaturesResponse(BaseModel):
     """Модель ответа со списком признаков"""
@@ -149,7 +176,8 @@ async def health_check():
     """
     return HealthResponse(
         status="ok",
-        model_loaded=model is not None
+        model_loaded=model is not None,
+        kafka_connected=producer is not None
     )
 
 
@@ -169,17 +197,39 @@ async def predict(features: WineFeatures):
             if new_key == "ph":
                 new_key = "pH"
             features_dict[new_key] = value
+
         result = model.predict(features_dict)
 
-        # СОХРАНЕНИЕ В БАЗУ ДАННЫХ
-        db.save_prediction(features_dict, result)
+        # Отправка в Kafka
+        if producer is not None:
+            message = {
+                "features": features_dict,
+                "result": result
+            }
+            producer.send('wine_predictions', message)
+            logger.info("📤 Message sent to Kafka topic 'wine_predictions'")
+        else:
+            logger.warning("⚠️ Kafka producer not available, prediction not sent to topic")
+
         return PredictionResponse(**result)
+
     except ValueError as e:
-        logger.warning(f"Invalid input: {e}")
+        logger.warning(f"Invalid input values: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except KeyError as e:
-        logger.error(f"Mapping error: {e}")
+        logger.error(f"Missing mapping key: {e}")
         raise HTTPException(status_code=422, detail=f"Missing feature in mapping: {e}")
+    except TypeError as e:
+        logger.error(f"Type error during prediction: {e}")
+        raise HTTPException(status_code=400, detail=f"Incorrect data types: {e}")
+    except KafkaTimeoutError as e:
+        logger.error(f"Kafka timeout while sending message: {e}")
+        # если Kafka тормозит, мы возвращаем пользователю предсказание, но логируем ошибку
+        return PredictionResponse(**result)
+    except KafkaError as e:
+        logger.error(f"Generic Kafka error during send: {e}")
+        return PredictionResponse(**result)
+
 
 @app.post("/predict_batch", response_model=BatchPredictionResponse, tags=["Prediction"])
 async def predict_batch(request: BatchPredictionRequest):
@@ -210,11 +260,12 @@ async def predict_batch(request: BatchPredictionRequest):
 
         return BatchPredictionResponse(predictions=results)
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Value error in batch: {e}")
+    except KeyError as e:
+        raise HTTPException(status_code=422, detail=f"Missing key in batch: {e}")
+    except TypeError as e:
+        raise HTTPException(status_code=400, detail=f"Type error in batch: {e}")
 
 
 @app.get("/features", response_model=FeaturesResponse, tags=["Info"])
@@ -251,11 +302,12 @@ async def get_metrics():
             "test_size": metrics.get('test_size', 0),
             "feature_importance": metrics.get('feature_importance', {})
         }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not load metrics: {str(e)}"
-        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Metrics file not found on disk")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"OS error reading metrics: {e}")
+    except (EOFError, ImportError, ModuleNotFoundError) as e:
+        raise HTTPException(status_code=500, detail=f"Data corruption or loading error: {e}")
 
 
 if __name__ == '__main__':
