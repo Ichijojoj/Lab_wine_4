@@ -2,6 +2,7 @@ import oracledb
 import os
 import logging
 
+from src.vault_manager import vault_manager
 logger = logging.getLogger(__name__)
 
 
