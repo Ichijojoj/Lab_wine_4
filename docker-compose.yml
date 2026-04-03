@@ -1,15 +1,40 @@
 version: '3.8'
 
 services:
+
+  vault:
+    image: hashicorp/vault:latest
+    container_name: wine-vault
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=${VAULT_TOKEN}
+      - VAULT_ADDR=http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    entrypoint: vault server -dev -dev-listen-address=0.0.0.0:8200 -dev-root-token-id=myroot
+
+  vault-init:
+    image: hashicorp/vault:latest
+    depends_on:
+      - vault
+    volumes:
+      - ./scripts:/scripts
+    environment:
+      - DB_APP_USER=${DB_APP_USER}
+      - DB_APP_PASSWORD=${DB_APP_PASSWORD}
+      - VAULT_TOKEN=${VAULT_TOKEN}
+    entrypoint: /bin/sh /scripts/init_vault.sh
+
   oracle-db:
     image: gvenzl/oracle-free:latest
     container_name: wine-oracle-db
     ports:
       - "1521:1521"
     environment:
-      - ORACLE_PASSWORD=YourStrongPassword123
-      - APP_USER=wine_user
-      - APP_USER_PASSWORD=wine_pass
+      - ORACLE_PASSWORD=${DB_ROOT_PASSWORD}
+      - APP_USER=${DB_APP_USER}
+      - APP_USER_PASSWORD=${DB_APP_PASSWORD}
     healthcheck:
       test: ["CMD", "healthcheck.sh"]
       interval: 30s
@@ -24,9 +49,12 @@ services:
     environment:
       - MODEL_PATH=/app/models/wine_model.pkl
       - SCALER_PATH=/app/models/scaler.pkl
-      - DB_USER=wine_user
-      - DB_PASSWORD=wine_pass
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=${VAULT_TOKEN}
       - DB_DSN=oracle-db:1521/FREEPDB1
+      # DB_USER и DB_PASSWORD из Vault
     depends_on:
       oracle-db:
         condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
