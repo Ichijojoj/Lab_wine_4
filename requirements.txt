@@ -24,3 +24,6 @@ dvc==3.45.0
 
 oracledb==2.1.0
 python-dotenv==1.0.1
+
+
+hvac==2.1.0
