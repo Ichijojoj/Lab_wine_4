@@ -4,7 +4,6 @@ on:
   pull_request:
     branches: [ main, master, dev ]
   push:
-    branches: [ main, master, dev ]
 
 env:
   REGISTRY: docker.io
@@ -50,7 +49,7 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/dev3'
+
 
     steps:
       - name: Checkout code
