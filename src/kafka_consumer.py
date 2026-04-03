@@ -3,9 +3,10 @@ import os
 import time
 import logging
 from kafka import KafkaConsumer
+import sys
 from kafka.errors import NoBrokersAvailable
-
-from vault_manager import vault_manager
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.vault_manager import vault_manager
 from database import OracleDB
 
 logging.basicConfig(level=logging.INFO)
