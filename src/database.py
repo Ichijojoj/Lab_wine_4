@@ -8,10 +8,15 @@ logger = logging.getLogger(__name__)
 
 class OracleDB:
     def __init__(self):
-        self.user = os.getenv("DB_USER")
-        self.password = os.getenv("DB_PASSWORD")
-        self.dsn = os.getenv("DB_DSN")  # Формат: "localhost:1521/FREEPDB1"
+        secrets = vault_manager.get_db_secrets()
+
+        self.user = secrets.get("DB_USER")
+        self.password = secrets.get("DB_PASSWORD")
+        self.dsn = os.getenv("DB_DSN")
         self.connection = None
+
+        if not self.user or not self.password:
+            logger.warning("⚠️ Database credentials not found in Vault!")
 
     def get_connection(self):
         try:
