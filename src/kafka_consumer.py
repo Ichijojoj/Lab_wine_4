@@ -13,47 +13,65 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def wait_for_kafka(broker, retries=10, delay=5):
-    for i in range(retries):
+class WineKafkaConsumer:
+    def __init__(self, broker: str, topic: str, group_id: str = 'wine_consumer_group'):
+        self.broker = broker
+        self.topic = topic
+        self.group_id = group_id
+        self.consumer = None
+        self.db = OracleDB()
+
+    def wait_for_kafka(self, retries=10, delay=5):
+        for i in range(retries):
+            try:
+                temp_consumer = KafkaConsumer(bootstrap_servers=[self.broker])
+                temp_consumer.close()
+                logger.info("✅ Успешное подключение к Kafka!")
+                return True
+            except NoBrokersAvailable:
+                logger.warning(f"⏳ Ожидание Kafka ({i + 1}/{retries})...")
+                time.sleep(delay)
+        raise Exception("Ошибка подключения к Kafka: брокер недоступен.")
+
+    def start(self):
+        self.wait_for_kafka()
+        self.db.init_db()
+
+        self.consumer = KafkaConsumer(
+            self.topic,
+            bootstrap_servers=[self.broker],
+            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+            group_id=self.group_id,
+            auto_offset_reset='earliest'
+        )
+
+        logger.info(f"🎧 Consumer запущен и ожидает сообщения в топике '{self.topic}'...")
+
         try:
-            consumer = KafkaConsumer(bootstrap_servers=[broker])
-            consumer.close()
-            logger.info("Успешное подключение к Kafka!")
-            return True
-        except NoBrokersAvailable:
-            logger.warning(f"⏳ Ожидание Kafka ({i + 1}/{retries})...")
-            time.sleep(delay)
-    raise Exception("Ошибка подключения к Kafka: брокер недоступен.")
+            for message in self.consumer:
+                data = message.value
+                logger.info(f"📥 Получено сообщение из Kafka: {data}")
 
+                features = data.get("features")
+                result = data.get("result")
 
-def start_consumer():
-    kafka_broker = os.getenv('KAFKA_BROKER', 'kafka:29092')
-    wait_for_kafka(kafka_broker)
+                if features and result:
+                    self.db.save_prediction(features, result)
+                    logger.info("💾 Данные успешно сохранены в БД Oracle")
+        except KeyboardInterrupt:
+            logger.info("Принудительная остановка консьюмера.")
+        finally:
+            self.close()
 
-    db = OracleDB()
-    db.init_db()
-
-    consumer = KafkaConsumer(
-        'wine_predictions',
-        bootstrap_servers=[kafka_broker],
-        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-        group_id='wine_consumer_group',
-        auto_offset_reset='earliest'
-    )
-
-    logger.info("🎧 Consumer запущен и ожидает сообщения...")
-
-    for message in consumer:
-        data = message.value
-        logger.info(f"📥 Получено сообщение из Kafka: {data}")
-
-        features = data.get("features")
-        result = data.get("result")
-
-        if features and result:
-            db.save_prediction(features, result)
-            logger.info("💾 Данные успешно сохранены в БД Oracle")
+    def close(self):
+        if self.consumer:
+            self.consumer.close()
+            logger.info("👋 Соединение с Kafka Consumer закрыто.")
 
 
 if __name__ == "__main__":
-    start_consumer()
+    kafka_broker = os.getenv('KAFKA_BROKER', 'kafka:29092')
+    kafka_topic = os.getenv('KAFKA_TOPIC', 'wine_predictions')
+
+    consumer = WineKafkaConsumer(broker=kafka_broker, topic=kafka_topic)
+    consumer.start()

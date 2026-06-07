@@ -71,6 +71,8 @@ services:
       - MODEL_PATH=/app/models/wine_model.pkl
       - SCALER_PATH=/app/models/scaler.pkl
       - KAFKA_BROKER=kafka:29092
+      - KAFKA_TOPIC=wine_predictions
+      - KAFKA_PARTITIONS=3
     depends_on:
       - kafka
 
@@ -84,6 +86,7 @@ services:
       - VAULT_TOKEN=${VAULT_TOKEN}
       - DB_DSN=oracle-db:1521/FREEPDB1
       - KAFKA_BROKER=kafka:29092
+      - KAFKA_TOPIC=wine_predictions
     depends_on:
       oracle-db:
         condition: service_healthy

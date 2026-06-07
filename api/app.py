@@ -1,28 +1,26 @@
 from contextlib import asynccontextmanager
 import logging
-import json
+import os
+import sys
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional
-import os
-import sys
-
-from kafka import KafkaProducer
 from kafka.errors import KafkaError, NoBrokersAvailable, KafkaTimeoutError
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.model import WineQualityModel
-
+from src.kafka_producer import WineKafkaProducer
 
 # Настройка логгера
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Глобальные объекты инициализируются строго внутри lifespan
 model: Optional[WineQualityModel] = None
-producer: Optional[KafkaProducer] = None
+producer: Optional[WineKafkaProducer] = None
 
 
 @asynccontextmanager
@@ -50,11 +48,15 @@ async def lifespan(app: FastAPI):
 
     try:
         kafka_broker = os.getenv('KAFKA_BROKER', 'localhost:9092')
-        producer = KafkaProducer(
-            bootstrap_servers=[kafka_broker],
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        kafka_topic = os.getenv('KAFKA_TOPIC', 'wine_predictions')
+        kafka_partitions = int(os.getenv('KAFKA_PARTITIONS', '3'))
+
+        producer = WineKafkaProducer(
+            broker=kafka_broker,
+            topic=kafka_topic,
+            num_partitions=kafka_partitions
         )
-        logger.info("✅ Kafka Producer initialized")
+        producer.connect()
     except NoBrokersAvailable as e:
         logger.error(f"❌ Kafka broker unavailable at {kafka_broker}: {e}")
         producer = None
@@ -64,6 +66,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Корректное закрытие ресурсов при остановке приложения
     model = None
     if producer is not None:
         producer.close()
@@ -153,9 +156,6 @@ class BatchPredictionResponse(BaseModel):
     predictions: List[PredictionResponse]
 
 
-model: Optional[WineQualityModel] = None
-
-
 @app.get("/", tags=["Main"])
 async def root():
     """Главная страница API"""
@@ -176,7 +176,7 @@ async def health_check():
     return HealthResponse(
         status="ok",
         model_loaded=model is not None,
-        kafka_connected=producer is not None
+        kafka_connected=producer is not None and producer.producer is not None
     )
 
 
@@ -199,14 +199,12 @@ async def predict(features: WineFeatures):
 
         result = model.predict(features_dict)
 
-        # Отправка в Kafka
-        if producer is not None:
-            message = {
-                "features": features_dict,
-                "result": result
-            }
-            producer.send('wine_predictions', message)
-            logger.info("📤 Message sent to Kafka topic 'wine_predictions'")
+        # Отправка через внешний сервис продюсера
+        if producer is not None and producer.producer is not None:
+            try:
+                producer.send_prediction(features_dict, result)
+            except Exception as e:
+                logger.error(f"❌ Error sending message to Kafka: {e}")
         else:
             logger.warning("⚠️ Kafka producer not available, prediction not sent to topic")
 
@@ -311,10 +309,4 @@ async def get_metrics():
 
 if __name__ == '__main__':
     import uvicorn
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=5000,
-        reload=True
-    )
+    uvicorn.run(app, host="0.0.0.0", port=5000, reload=True)
